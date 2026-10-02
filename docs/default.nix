@@ -4,13 +4,8 @@
   ...
 }: let
   modules = lib.evalModules {
-    modules = [
-      ../module/options.nix
-      ({config, ...}: {
-        config._module.args = {inherit pkgs;};
-        config.opencode-sandbox.git.remote.url = "https://github.com/Trantorian1/opencode-sandbox.git";
-      })
-    ];
+    modules = [../module/options.nix];
+    specialArgs = {inherit pkgs;};
   };
 
   isPackage = value:
@@ -28,116 +23,76 @@
     then "[${lib.concatStringsSep " " (builtins.map packageName default)}]"
     else let
       value = packageName default;
-      readable =
-        if builtins.isBool value
-        then lib.boolToString value
-        else builtins.toString value;
     in
-      readable;
+      if builtins.isBool value
+      then lib.boolToString value
+      else builtins.toString value;
 
-  valueInfo = value:
+  optionInfo = option:
     {
-      description = value.description;
-      type = value.type.description;
+      description = option.description;
+      type = option.type.description;
     }
-    // lib.optionalAttrs (value ? default) {default = humanReadable value.default;}
-    // lib.optionalAttrs (value ? example) {example = value.example;};
+    // lib.optionalAttrs (option ? default) {default = humanReadable option.default;}
+    // lib.optionalAttrs (option ? example) {example = option.example;};
 
-  extract = info: attrs:
+  flatten = path: options:
     builtins.concatMap (option: let
-      value = attrs.${option};
-      type = value.type.name;
-      info_new = rec {
-        path =
-          if info.path == ""
-          then option
-          else "${info.path}.${option}";
-        parents =
-          info.parents
-          ++ [
-            {
-              name = path;
-              value = valueInfo value;
-            }
-          ];
-      };
+      value = options.${option};
+      name =
+        if path == ""
+        then option
+        else "${path}.${option}";
     in
       if value ? internal && value.internal == true
       then []
-      else if type == "submodule"
-      then let
-        submodule_options =
-          builtins.removeAttrs
-          value.valueMeta.configuration.options
-          ["_module"];
+      else let
+        children =
+          if value.type.name == "submodule"
+          then flatten name (builtins.removeAttrs value.valueMeta.configuration.options ["_module"])
+          else [];
       in
-        extract info_new submodule_options
-      else
-        [
-          {
-            name = info_new.path;
-            value = valueInfo value;
-          }
-        ]
-        ++ info.parents)
-    (builtins.attrNames attrs);
+        [(lib.nameValuePair name (optionInfo value))] ++ children)
+    (builtins.attrNames options);
 
-  info = {
-    path = "";
-    parents = [];
-  };
+  options = lib.listToAttrs (flatten "" modules.options.opencode-sandbox);
 
-  options = builtins.listToAttrs (extract info modules.options.opencode-sandbox);
+  renderDefault = default:
+    if builtins.length (lib.splitString "\n" default) > 1
+    then ''
 
-  md = lib.concatMapStringsSep "\n" (name: let
-    info = options.${name};
-    default =
-      if info ? default
-      then let
-        lines = lib.splitString "\n" info.default;
-      in
-        if builtins.length lines > 1
-        then ''
+      _default_:
+      ```
+      ${default}
+      ```''
+    else ''
 
-          _default_:
-          ```
-          ${info.default}
-          ```''
-        else ''
+      _default_: `${default}`'';
 
-          _default_: `${info.default}`''
-      else "";
-    example =
-      if info  ? example
-      then let
-        lines = lib.splitString "\n" info.example;
-        first = builtins.elemAt lines 0;
-        rest = builtins.genList (i: builtins.elemAt lines (i + 1)) ((builtins.length lines) - 1);
-
-        full_value =
-          if builtins.length rest > 0
-          then let
-            indented = builtins.concatStringsSep "\n" (map (l: "  " + l) rest);
-          in
-            builtins.concatStringsSep "\n" [first indented]
-          else first;
-      in ''
-
-        ### Example
-
-        ```nix
-        opencode-sandbox = {
-          ${name} = ${full_value};
-        };
-        ```
-      ''
-      else "";
+  renderExample = name: example: let
+    lines = lib.splitString "\n" example;
+    value =
+      if lib.tail lines == []
+      then lib.head lines
+      else "${lib.head lines}\n${lib.concatStringsSep "\n" (builtins.map (l: "  " + l) (lib.tail lines))}";
   in ''
+
+    ### Example
+
+    ```nix
+    opencode-sandbox = {
+      ${name} = ${value};
+    };
+    ```
+  '';
+
+  renderOption = name: info: ''
     ## `${name}`
 
-    _type_: `${info.type}`${default}
+    _type_: `${info.type}`${lib.optionalString (info ? default) (renderDefault info.default)}
 
-    ${info.description}${example}'')
-  (builtins.attrNames options);
+    ${info.description}${lib.optionalString (info ? example) (renderExample name info.example)}'';
+
+  md = lib.concatMapStringsSep "\n" (name: renderOption name options.${name}) (builtins.attrNames options);
 in
   pkgs.writeText "docs.md" md
